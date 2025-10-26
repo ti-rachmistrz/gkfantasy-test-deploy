@@ -1,0 +1,57 @@
+name: Deploy Container Lambda (develop)
+
+on:
+  push:
+    branches: [ "develop" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+  ECR_REPO: ${{ secrets.ECR_REPO }}
+  LAMBDA_FUNCTION_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+  ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/${ECR_REPO}:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/${ECR_REPO}:$IMAGE_TAG
+          # also push a 'develop' tag for convenience
+          docker tag $ECR_REGISTRY/${ECR_REPO}:$IMAGE_TAG $ECR_REGISTRY/${ECR_REPO}:develop
+          docker push $ECR_REGISTRY/${ECR_REPO}:develop
+          echo "IMAGE_URI=$ECR_REGISTRY/${ECR_REPO}:$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Update Lambda to new image
+        run: |
+          aws lambda update-function-code \
+            --function-name "${LAMBDA_FUNCTION_NAME}" \
+            --image-uri "${IMAGE_URI}" \
+            --publish
+
+      - name: Output Lambda version
+        run: |
+          aws lambda get-function --function-name "${LAMBDA_FUNCTION_NAME}" --query 'Configuration.[Version,LastModified,ImageUri]'
